@@ -6,6 +6,7 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
@@ -16,204 +17,209 @@
 /* USER CODE BEGIN Includes */
 #include "motor.h"
 #include "sensors.h"  
-#include "OLED.h"     
 #include "PID.h"   
+#include "oled.h"    // <<-- ä¿®æ­£ 1ï¼šå¿…é¡»åŒ…å« OLED å¤´æ–‡ä»¶
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define TRIG_PORT GPIOB
+#define TRIG_PIN  GPIO_PIN_9
+#define ECHO_PORT GPIOB
+#define ECHO_PIN  GPIO_PIN_10
+#define SERVO_PIN GPIO_PIN_8
+#define SERVO_PORT GPIOB
 
+// é¿éšœè·ç¦»é˜ˆå€¼ (åŽ˜ç±³)
+#define OBSTACLE_LIMIT 5.0f
+#define STOP_FLAG 99
 /* USER CODE END PD */
 
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
 /* Private variables ---------------------------------------------------------*/
-
 /* USER CODE BEGIN PV */
-
+PID_t trackPID; 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
 
+/* USER CODE BEGIN PFP */
+/* --- ç¡¬ä»¶é©±åŠ¨å‡½æ•°å£°æ˜Ž --- */
+void DWT_Init(void);
+void DWT_DelayUs(uint32_t us);
+float Get_Distance(void);
+void Servo_SetAngle(float angle);
+
+/* --- å¾ªçº¿ä¸ŽæŽ§åˆ¶å‡½æ•°å£°æ˜Ž --- */
+uint8_t Get_Sensor_State(void);
+int8_t Calculate_Error(uint8_t state);
+void Track_Process(PID_t *pid, int16_t Base_Speed);
+void Detour_Sequence(void);
+
+/* æ³¨æ„ï¼šè¿™é‡Œçš„å‚æ•°ç±»åž‹ int16_t å¿…é¡»ä¸Ž motor.c ä¸­å®Œå…¨ä¸€è‡´ */
+void Motor_SetSpeed(int16_t Left, int16_t Right);
+void Motor_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-// ¶¨ÒåÒ»¸öÈ«ºÚÍ£³µµÄÌØÊâ±êÖ¾Î»
-#define STOP_FLAG 99
-
-// 1. ×´Ì¬Ñ¹Ëõ£ºÖ±½Óµ÷ÓÃ´«¸ÐÆ÷Ä£¿é½Ó¿Ú
-uint8_t Get_Sensor_State(void)
-{
-    // Ö±½Óµ÷ÓÃSensor_Read_Tracking()£¬·µ»Ø4Î»×´Ì¬
-    return Sensor_Read_Tracking();
+void DWT_Init(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; 
+    DWT->CYCCNT = 0;                                
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;            
 }
 
-// 2. Îó²î¼ÆËã£¨¾«Ï¸»¯·ÖÀà + Ê¶±ðÖ±½Ç + Ê¶±ðÈ«ºÚ£©
-int8_t Calculate_Error(uint8_t state)
-{
+void DWT_DelayUs(uint32_t us) {
+    uint32_t startTicks = DWT->CYCCNT;
+    uint32_t targetTicks = us * (SystemCoreClock / 1000000);
+    while ((DWT->CYCCNT - startTicks) < targetTicks);
+}
+
+float Get_Distance(void) {
+    uint32_t ticks;
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_SET);
+    DWT_DelayUs(15);
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
+
+    uint32_t timeout = 100000;
+    while(HAL_GPIO_ReadPin(ECHO_PORT, ECHO_PIN) == GPIO_PIN_RESET && timeout--);
+    if(timeout == 0) return 999.0f;
+
+    uint32_t start_ticks = DWT->CYCCNT;
+    while(HAL_GPIO_ReadPin(ECHO_PORT, ECHO_PIN) == GPIO_PIN_SET);
+    ticks = DWT->CYCCNT - start_ticks;
+
+    return (float)ticks * 0.034f / 2.0f / (SystemCoreClock / 1000000);
+}
+
+void Servo_SetAngle(float angle) {
+    uint32_t pulse_us = (uint32_t)(500 + (angle / 180.0f) * 2000);
+    HAL_GPIO_WritePin(SERVO_PORT, SERVO_PIN, GPIO_PIN_SET);
+    DWT_DelayUs(pulse_us);
+    HAL_GPIO_WritePin(SERVO_PORT, SERVO_PIN, GPIO_PIN_RESET);
+}
+
+uint8_t Get_Sensor_State(void) {
+    return Sensor_Read_Tracking(); 
+}
+
+int8_t Calculate_Error(uint8_t state) {
     static int8_t last_error = 0; 
     int8_t error = 0;
 
-    switch (state)
-    {
-        // === µÚÒ»ÌÝ¶Ó£ºÆ½ÎÈ×ßÏß£¨Î¢µ÷£© ===
-        case 0x06: error = 0;  break; // 0110£ºÍêÃÀ¾ÓÖÐ£¨ÖÐ¼äÁ½Ì½Í·Ñ¹Ïß£©
-        case 0x04: error = -1; break; // 0100£ºÆ«ÓÒÒ»µã
-        case 0x02: error = 1;  break; // 0010£ºÆ«×óÒ»µã
-        case 0x0C: error = -2; break; // 1100£ºÆ«ÓÒ½Ï¶à
-        case 0x03: error = 2;  break; // 0011£ºÆ«×ó½Ï¶à
-
-        // === µÚ¶þÌÝ¶Ó£ºÖ±½Ç×ªÍäÏÈÕ×===
-        case 0x08: error = -4; break; // 1000£º¼«¶ÈÆ«ÓÒ
-        case 0x01: error = 4;  break; // 0001£º¼«¶ÈÆ«×ó
-        case 0x0E: error = -5; break; // 1110£º±ê×¼µÄ×óÖ±½ÇÍä
-        case 0x07: error = 5;  break; // 0111£º±ê×¼µÄÓÒÖ±½ÇÍä
-
-        // === µÚÈýÌÝ¶Ó£ºÈ«ºÚÖ¸Ê¾ÏßÍ£³µ ===
-        case 0x0F: return STOP_FLAG;  // 1111£ºËÄÂ·È«ÁÁ£¬Óöµ½È«ºÚµÄ´¹Ö±Ö¸Ê¾Ïß
-
-        // === µÚËÄÌÝ¶Ó£ºÍêÈ«ÍÑÏß£¨ÒÀÀµ¼ÇÒä²¹¾È£© ===
+    switch (state) {
+        case 0x06: error = 0;  break; 
+        case 0x04: error = -1; break; 
+        case 0x02: error = 1;  break; 
+        case 0x0C: error = -2; break; 
+        case 0x03: error = 2;  break; 
+        case 0x08: error = -4; break; 
+        case 0x01: error = 4;  break; 
+        case 0x0F: return STOP_FLAG;  
         case 0x00: 
-            if (last_error > 0)
-                error = 5;   // ¼«ÏÞÓÒ×ªÕÒÏß
-            else if (last_error < 0)
-                error = -5;  // ¼«ÏÞ×ó×ªÕÒÏß
-            else
-                error = 0;   
+            if (last_error > 0) error = 5; 
+            else if (last_error < 0) error = -5;
+            else error = 0;
             break;
-
-        // ÆäËûÎ´ÖªÔëµã×´Ì¬
-        default:
-            error = last_error; 
-            break;
+        default: error = last_error; break;
     }
-    
-    
-    if (state != 0x00 && state != 0x0F) {
-        last_error = error; 
-    }
-    
+    if (state != 0x00 && state != 0x0F) last_error = error;
     return error;
 }
 
-// 3. Ö÷¿ØÖÆÁ÷£º¼ÓÈë¶¯Ì¬½µËÙÓëÍ£³µÂß¼­
-void Track_Process(PID_t *pid, int16_t Base_Speed)
-{
+void Track_Process(PID_t *pid, int16_t Base_Speed) {
     uint8_t sensor_state = Get_Sensor_State(); 
     int8_t error = Calculate_Error(sensor_state); 
 
-    // --- 1. Í£³µÂß¼­ ---
-    if (error == STOP_FLAG) 
-    {
-        Motor_SetSpeed(0, 0); // ³¹µ×É²Í£µç»ú
-        
-        // ×¢Òâ£ºÈç¹ûÄãÏ£ÍûÐ¡³µÍ£ÏÂºó¾Í³¹µ×°Õ¹¤²»ÔÙ¶¯ÁË£¬Çë°ÑÏÂÃæÕâÐÐ´úÂëµÄ×¢ÊÍ(//)È¥µô
-        //while(1) { Motor_SetSpeed(0, 0); } 
-        
-        return; // Ö±½ÓÍË³ö£¬²»ÔÙ½øÐÐPID¼ÆËã
+    if (error == STOP_FLAG) {
+        Motor_SetSpeed(0, 0);
+        return; 
     }
 
-    // --- 2. Ö±½Ç×ªÍä¡°¶¯Ì¬½µËÙ¡±Âß¼­ ---
     int16_t current_base_speed = Base_Speed;
-    if (error >= 4 || error <= -4) 
-    {
-        current_base_speed = Base_Speed / 2; // Óöµ½¼±Íä/Ö±½Ç£¬»ù´¡ËÙ¶È¼õ°ë£¬·À³å³ö
+    if (error >= 4 || error <= -4) current_base_speed = Base_Speed / 2; 
+
+    int16_t Turn_Compensate = (int16_t)PID_Compute(pid, 0, (float)error); 
+    Motor_SetSpeed(current_base_speed + Turn_Compensate, current_base_speed - Turn_Compensate); 
+}
+
+void Detour_Sequence(void) {
+    Motor_SetSpeed(0, 0);
+    Servo_SetAngle(0); 
+    HAL_Delay(500);
+    Motor_SetSpeed(350, -350); 
+    HAL_Delay(450); 
+    Motor_SetSpeed(300, 300);  
+    HAL_Delay(800);
+    Motor_SetSpeed(-350, 350); 
+    HAL_Delay(900);
+    Motor_SetSpeed(300, 300);  
+
+    HAL_Delay(1000);
+    Motor_SetSpeed(-350, 350); 
+    HAL_Delay(400);
+    Servo_SetAngle(90); 
+    while(1) {
+        Motor_SetSpeed(200, 200); 
+        if(Get_Sensor_State() != 0x00) break; 
+        HAL_Delay(10);
     }
-
-    // --- 3. PID ¼ÆËãÓëÊä³ö ---
-    int16_t Turn_Compensate = PID_Compute(pid, 0, error); 
-    
-    int16_t speed_L = current_base_speed + Turn_Compensate; 
-    int16_t speed_R = current_base_speed - Turn_Compensate; 
-
-    Motor_SetSpeed(speed_L, speed_R); 
 }
 /* USER CODE END 0 */
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
 int main(void)
 {
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* Configure the system clock */
   SystemClock_Config();
 
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
-  
+
   /* USER CODE BEGIN 2 */
-
-  // 1. Ó²¼þ³õÊ¼»¯
-  // ---------------------------------------------------------
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  __HAL_RCC_GPIOA_CLK_ENABLE(); 
-  GPIO_InitStruct.Pin = GPIO_PIN_2 | GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_2, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_3, GPIO_PIN_SET);
-  HAL_Delay(200); 
-  // ---------------------------------------------------------
-
+  DWT_Init(); 
   Motor_Init();
   OLED_Init();
+  
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
-  
-  // 2. PID ³õÊ¼»¯
-  PID_t trackPID;
-  PID_Init(&trackPID);
-  
-  // ÉèÖÃ PID ²ÎÊý (»¹Ã»ÓÐµ÷ÊÔ)
-  trackPID.Kp = 50.0f;  // ³õÊ¼PÖµ
-  trackPID.Ki = 0.0f;   // Ñ­¼£Í¨³£²»ÐèÒªI
-  trackPID.Kd = 20.0f;   // ³õÊ¼DÖµ
-  trackPID.OutMax = 400; // ×î´ó²îËÙÏÞÖÆ
-  trackPID.OutMin = -400;
 
-  // 3. ³õÊ¼½çÃæÏÔÊ¾
-  OLED_Clear();
-  OLED_ShowString(0, 0,  "Track:", OLED_8X16);
-  OLED_ShowString(0, 20, "PID:",   OLED_8X16);
-  OLED_ShowString(0, 40, "Mode:",  OLED_8X16);
-  OLED_Update();
-	
+  PID_Init(&trackPID);
+  trackPID.Kp = 60.0f;  
+  trackPID.Ki = 0.0f;   
+  trackPID.Kd = 25.0f;   
+  trackPID.OutMax = 400; 
+  trackPID.OutMin = -400;
   /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-    // Ö÷Ñ­»·Ö»ÓÃºËÐÄº¯Êý£¬½á¹¹¸ü¼ò½à
-    while (1)
-    {
-        Track_Process(&trackPID, 300); // »ù´¡ËÙ¶È300
-        HAL_Delay(10);
-    }
-  /* USER CODE END WHILE */
+  while (1)
+  {
+      float dist = Get_Distance();
+
+      if (dist > 0 && dist < OBSTACLE_LIMIT) 
+      {
+          Detour_Sequence(); 
+      }
+      else 
+      {
+          Track_Process(&trackPID, 300); 
+      }
+      HAL_Delay(10); 
+  }
 }
+
+/* åŽé¢çš„ SystemClock_Config å’Œ Error_Handler ä¿æŒä¸å˜ */
+
+/* USER CODE BEGIN 4 */
+/* è¿™é‡Œå¯ä»¥æ”¾ä¸€äº›å›žè°ƒå‡½æ•°ï¼Œå¦‚æžœæ²¡æœ‰å°±ç©ºç€ */
+/* USER CODE END 4 */
 
 /**
   * @brief System Clock Configuration
@@ -225,9 +231,6 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -240,8 +243,6 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -261,10 +262,6 @@ void SystemClock_Config(void)
   }
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
@@ -275,23 +272,4 @@ void Error_Handler(void)
   while (1)
   {
   }
-
-  /* USER CODE END Error_Handler_Debug */
 }
-
-#ifdef  USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
-}
-#endif /* USE_FULL_ASSERT */
