@@ -16,158 +16,56 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "motor.h"
-#include "sensors.h"  
-#include "PID.h"   
-#include "oled.h"    // <<-- 修正 1：必须包含 OLED 头文件
+#include "sensors.h"
+#include "PID.h"  // 确保你的PID.h中定义了 PID_t 类型
 /* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-/* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define TRIG_PORT GPIOB
-#define TRIG_PIN  GPIO_PIN_9
-#define ECHO_PORT GPIOB
-#define ECHO_PIN  GPIO_PIN_10
-#define SERVO_PIN GPIO_PIN_8
-#define SERVO_PORT GPIOB
-
-// 避障距离阈值 (厘米)
-#define OBSTACLE_LIMIT 5.0f
 #define STOP_FLAG 99
 /* USER CODE END PD */
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-PID_t trackPID; 
+PID_t linePID;  // <<-- 修正 1: 定义PID结构体变量
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 
 /* USER CODE BEGIN PFP */
-/* --- 硬件驱动函数声明 --- */
-void DWT_Init(void);
-void DWT_DelayUs(uint32_t us);
-float Get_Distance(void);
-void Servo_SetAngle(float angle);
-
-/* --- 循线与控制函数声明 --- */
-uint8_t Get_Sensor_State(void);
-int8_t Calculate_Error(uint8_t state);
-void Track_Process(PID_t *pid, int16_t Base_Speed);
-void Detour_Sequence(void);
-
-/* 注意：这里的参数类型 int16_t 必须与 motor.c 中完全一致 */
-void Motor_SetSpeed(int16_t Left, int16_t Right);
-void Motor_Init(void);
+int8_t Get_Line_Error(uint8_t state);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-void DWT_Init(void) {
-    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; 
-    DWT->CYCCNT = 0;                                
-    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;            
-}
-
-void DWT_DelayUs(uint32_t us) {
-    uint32_t startTicks = DWT->CYCCNT;
-    uint32_t targetTicks = us * (SystemCoreClock / 1000000);
-    while ((DWT->CYCCNT - startTicks) < targetTicks);
-}
-
-float Get_Distance(void) {
-    uint32_t ticks;
-    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_SET);
-    DWT_DelayUs(15);
-    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
-
-    uint32_t timeout = 100000;
-    while(HAL_GPIO_ReadPin(ECHO_PORT, ECHO_PIN) == GPIO_PIN_RESET && timeout--);
-    if(timeout == 0) return 999.0f;
-
-    uint32_t start_ticks = DWT->CYCCNT;
-    while(HAL_GPIO_ReadPin(ECHO_PORT, ECHO_PIN) == GPIO_PIN_SET);
-    ticks = DWT->CYCCNT - start_ticks;
-
-    return (float)ticks * 0.034f / 2.0f / (SystemCoreClock / 1000000);
-}
-
-void Servo_SetAngle(float angle) {
-    uint32_t pulse_us = (uint32_t)(500 + (angle / 180.0f) * 2000);
-    HAL_GPIO_WritePin(SERVO_PORT, SERVO_PIN, GPIO_PIN_SET);
-    DWT_DelayUs(pulse_us);
-    HAL_GPIO_WritePin(SERVO_PORT, SERVO_PIN, GPIO_PIN_RESET);
-}
-
-uint8_t Get_Sensor_State(void) {
-    return Sensor_Read_Tracking(); 
-}
-
-int8_t Calculate_Error(uint8_t state) {
-    static int8_t last_error = 0; 
-    int8_t error = 0;
-
+/**
+ * 误差提取逻辑（针对传感器间距不均优化）
+ * 状态定义: L2 L1 R1 R2 (从左到右)
+ * 灰线返回 1
+ */
+int8_t Get_Line_Error(uint8_t state) {
     switch (state) {
-        case 0x06: error = 0;  break; 
-        case 0x04: error = -1; break; 
-        case 0x02: error = 1;  break; 
-        case 0x0C: error = -2; break; 
-        case 0x03: error = 2;  break; 
-        case 0x08: error = -4; break; 
-        case 0x01: error = 4;  break; 
-        case 0x0F: return STOP_FLAG;  
-        case 0x00: 
-            if (last_error > 0) error = 5; 
-            else if (last_error < 0) error = -5;
-            else error = 0;
-            break;
-        default: error = last_error; break;
-    }
-    if (state != 0x00 && state != 0x0F) last_error = error;
-    return error;
-}
-
-void Track_Process(PID_t *pid, int16_t Base_Speed) {
-    uint8_t sensor_state = Get_Sensor_State(); 
-    int8_t error = Calculate_Error(sensor_state); 
-
-    if (error == STOP_FLAG) {
-        Motor_SetSpeed(0, 0);
-        return; 
-    }
-
-    int16_t current_base_speed = Base_Speed;
-    if (error >= 4 || error <= -4) current_base_speed = Base_Speed / 2; 
-
-    int16_t Turn_Compensate = (int16_t)PID_Compute(pid, 0, (float)error); 
-    Motor_SetSpeed(current_base_speed + Turn_Compensate, current_base_speed - Turn_Compensate); 
-}
-
-void Detour_Sequence(void) {
-    Motor_SetSpeed(0, 0);
-    Servo_SetAngle(0); 
-    HAL_Delay(500);
-    Motor_SetSpeed(350, -350); 
-    HAL_Delay(450); 
-    Motor_SetSpeed(300, 300);  
-    HAL_Delay(800);
-    Motor_SetSpeed(-350, 350); 
-    HAL_Delay(900);
-    Motor_SetSpeed(300, 300);  
-
-    HAL_Delay(1000);
-    Motor_SetSpeed(-350, 350); 
-    HAL_Delay(400);
-    Servo_SetAngle(90); 
-    while(1) {
-        Motor_SetSpeed(200, 200); 
-        if(Get_Sensor_State() != 0x00) break; 
-        HAL_Delay(10);
+        case 0x06: return 0;   // 0110 正中心
+        
+        // 稍微偏移
+        case 0x04: return -1;  // 0100 
+        case 0x02: return 1;   // 0010 
+        
+        // 中度偏移
+        case 0x0C: return -2;  // 1100
+        case 0x03: return 2;   // 0011
+        
+        // 严重偏移（外侧触发）
+        // 因为外侧远，赋予大权重(5)，强制PID输出大动作防止丢线
+        case 0x08: return -5;  // 1000 极左
+        case 0x01: return 5;   // 0001 极右
+        
+        // 停止状态
+        case 0x00: return STOP_FLAG; // 全白：停止
+        case 0x0F: return STOP_FLAG; // 全黑：停止
+        
+        default: return 0;
     }
 }
 /* USER CODE END 0 */
@@ -177,6 +75,7 @@ int main(void)
   HAL_Init();
   SystemClock_Config();
 
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
   MX_TIM2_Init();
@@ -184,46 +83,54 @@ int main(void)
   MX_TIM4_Init();
 
   /* USER CODE BEGIN 2 */
-  DWT_Init(); 
-  Motor_Init();
-  OLED_Init();
-  
-  HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
-  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+  Motor_Init(); // 内部会开启TIM3 PWM
 
-  PID_Init(&trackPID);
-  trackPID.Kp = 60.0f;  
-  trackPID.Ki = 0.0f;   
-  trackPID.Kd = 25.0f;   
-  trackPID.OutMax = 400; 
-  trackPID.OutMin = -400;
+  // <<-- 修正 2: 初始化PID参数
+  // 根据你的实际硬件调整 Kp, Ki, Kd
+  PID_Init(&linePID); 
+  linePID.Kp = 55.0f;   // 基础转向灵敏度
+  linePID.Ki = 0.0f;    // 循线通常设为0
+  linePID.Kd = 20.0f;   // 阻尼，防止摆动
+  linePID.OutMax = 400; // 最大转向补偿
+  linePID.OutMin = -400;
   /* USER CODE END 2 */
 
+  /* Infinite loop */
   while (1)
   {
-      float dist = Get_Distance();
-
-      if (dist > 0 && dist < OBSTACLE_LIMIT) 
+      // 1. 读取传感器状态 (L2 L1 R1 R2)
+      uint8_t sensor_status = Sensor_Read_Tracking();
+      
+      // 2. 获取误差值
+      int8_t error = Get_Line_Error(sensor_status);
+      
+      // 3. 逻辑处理
+      if (error == STOP_FLAG) 
       {
-          Detour_Sequence(); 
+          Motor_SetSpeed(0, 0); // 彻底刹车
       }
       else 
       {
-          Track_Process(&trackPID, 300); 
+          // 4. 动态调整基础速度
+          // 外侧传感器触发时(误差为5/-5)，降低基础速度，增加过弯成功率
+          int16_t base_speed = 300; 
+          if (error >= 5 || error <= -5) {
+              base_speed = 150; 
+          }
+          
+          // 5. 计算PID输出 (假设 PID_Compute 第2个参数是目标值，这里是0)
+          int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
+          
+          // 6. 控制电机 (左加右减，如果方向反了，把这里的 + - 对调)
+          Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
       }
-      HAL_Delay(10); 
+      
+      HAL_Delay(10); // 增加到10ms，给PID更稳定的采样周期
   }
 }
 
-/* 后面的 SystemClock_Config 和 Error_Handler 保持不变 */
-
-/* USER CODE BEGIN 4 */
-/* 这里可以放一些回调函数，如果没有就空着 */
-/* USER CODE END 4 */
-
 /**
   * @brief System Clock Configuration
-  * @retval None
   */
 void SystemClock_Config(void)
 {
@@ -262,10 +169,6 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
   __disable_irq();

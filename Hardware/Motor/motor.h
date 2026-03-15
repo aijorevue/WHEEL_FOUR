@@ -3,18 +3,17 @@
 
 #include "main.h"
 
-// �����/��ת����
-void moto(int mode);
 
-// ���ҵ���ջ�����
-int Velocity_A(int TargetVelocity, int CurrentVelocity);
-int Velocity_B(int TargetVelocity, int CurrentVelocity);
+void Motor_Init(void);
 
-// �����߼���װ����
-void Motor_Stop(void);       // ֹͣ���
-void Motor_Forward(void);    // ǰ��
-void Motor_Back(void);       // ����
-void Motor_Left(void);       // ��ת
-void Motor_Right(void);      // ��ת
+/**
+  * @brief  设置电机速度
+  * @param  speed_A: 电机A（通常为左电机）速度，范围 -999 到 999
+  *                  正数为前进，负数为后退，0为刹车停止
+  * @param  speed_B: 电机B（通常为右电机）速度，范围 -999 到 999
+  *                  正数为前进，负数为后退，0为刹车停止
+  * @retval 无
+  */
+void Motor_SetSpeed(int speed_A, int speed_B);
 
-#endif
+#endif /* __MOTOR_H */
