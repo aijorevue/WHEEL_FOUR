@@ -18,6 +18,7 @@
 #include "motor.h"
 #include "sensors.h"
 #include "PID.h"  // 确保你的PID.h中定义了 PID_t 类型
+#include "echo.h" // 超声波测距相关函数
 /* USER CODE END Includes */
 
 /* Private define ------------------------------------------------------------*/
@@ -68,6 +69,7 @@ int8_t Get_Line_Error(uint8_t state) {
         default: return 0;
     }
 }
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
 /* USER CODE END 0 */
 
 int main(void)
@@ -84,7 +86,7 @@ int main(void)
 
   /* USER CODE BEGIN 2 */
   Motor_Init(); // 内部会开启TIM3 PWM
-
+   HAL_TIM_Base_Start(&htim2); 
   // <<-- 修正 2: 初始化PID参数
   // 根据你的实际硬件调整 Kp, Ki, Kd
   PID_Init(&linePID); 
@@ -96,36 +98,35 @@ int main(void)
   /* USER CODE END 2 */
 
   /* Infinite loop */
+  
   while (1)
   {
-      // 1. 读取传感器状态 (L2 L1 R1 R2)
-      uint8_t sensor_status = Sensor_Read_Tracking();
-      
-      // 2. 获取误差值
-      int8_t error = Get_Line_Error(sensor_status);
-      
-      // 3. 逻辑处理
-      if (error == STOP_FLAG) 
+      // 1. 调用封装好的避障判断函数 (设置15cm为阈值)
+      if (Echo_Should_Stop(15.0f)) 
       {
-          Motor_SetSpeed(0, 0); // 彻底刹车
+          Motor_SetSpeed(0, 0); // 优先级最高：停车
       }
       else 
       {
-          // 4. 动态调整基础速度
-          // 外侧传感器触发时(误差为5/-5)，降低基础速度，增加过弯成功率
-          int16_t base_speed = 300; 
-          if (error >= 5 || error <= -5) {
-              base_speed = 150; 
+          // 2. 只有安全时才执行循线
+          uint8_t sensor_status = Sensor_Read_Tracking();
+          int8_t error = Get_Line_Error(sensor_status);
+          
+          if (error == STOP_FLAG) 
+          {
+              Motor_SetSpeed(0, 0); 
           }
-          
-          // 5. 计算PID输出 (假设 PID_Compute 第2个参数是目标值，这里是0)
-          int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
-          
-          // 6. 控制电机 (左加右减，如果方向反了，把这里的 + - 对调)
-          Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
+          else 
+          {
+              int16_t base_speed = 300; 
+              if (error >= 5 || error <= -5) base_speed = 150; 
+              
+              int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
+              Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
+          }
       }
       
-      HAL_Delay(10); // 增加到10ms，给PID更稳定的采样周期
+      HAL_Delay(5); // 给 PID 留 5ms 采样间隔
   }
 }
 
@@ -176,3 +177,10 @@ void Error_Handler(void)
   {
   }
 }
+/* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    // 调用我们单开的文件里的处理函数
+    Echo_EXTI_Callback(GPIO_Pin);
+}
+/* USER CODE END 4 */
