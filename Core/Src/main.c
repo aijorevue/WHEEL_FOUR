@@ -29,6 +29,7 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
 PID_t linePID;  // <<-- 修正 1: 定义PID结构体变量
+int8_t last_error = 0; // 用于记录上一次有效的误差
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -59,8 +60,8 @@ int8_t Get_Line_Error(uint8_t state) {
         
         // 严重偏移（外侧触发）
         // 因为外侧远，赋予大权重(5)，强制PID输出大动作防止丢线
-        case 0x08: return -5;  // 1000 极左
-        case 0x01: return 5;   // 0001 极右
+        case 0x08: return -3;  // 1000 极左
+        case 0x01: return 3;   // 0001 极右
         
         // 停止状态
         case 0x00: return STOP_FLAG; // 全白：停止
@@ -90,44 +91,48 @@ int main(void)
   // <<-- 修正 2: 初始化PID参数
   // 根据你的实际硬件调整 Kp, Ki, Kd
   PID_Init(&linePID); 
-  linePID.Kp = 55.0f;   // 基础转向灵敏度
+  linePID.Kp = 50.0f;   // 基础转向灵敏度
   linePID.Ki = 0.0f;    // 循线通常设为0
   linePID.Kd = 20.0f;   // 阻尼，防止摆动
-  linePID.OutMax = 400; // 最大转向补偿
-  linePID.OutMin = -400;
+  linePID.OutMax = 200; // 最大转向补偿
+  linePID.OutMin = -200;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   
-  while (1)
-  {
-      // 1. 调用封装好的避障判断函数 (设置15cm为阈值)
-      if (Echo_Should_Stop(15.0f)) 
-      {
-          Motor_SetSpeed(0, 0); // 优先级最高：停车
-      }
-      else 
-      {
-          // 2. 只有安全时才执行循线
-          uint8_t sensor_status = Sensor_Read_Tracking();
-          int8_t error = Get_Line_Error(sensor_status);
-          
-          if (error == STOP_FLAG) 
-          {
-              Motor_SetSpeed(0, 0); 
-          }
-          else 
-          {
-              int16_t base_speed = 300; 
-              if (error >= 5 || error <= -5) base_speed = 150; 
-              
-              int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
-              Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
-          }
-      }
-      
-      HAL_Delay(5); // 给 PID 留 5ms 采样间隔
-  }
+ /* USER CODE BEGIN WHILE */
+/* USER CODE BEGIN WHILE */
+while (1)
+{
+    
+    // 1. 避障优先级最高
+    if (Echo_Should_Stop(15.0f)) {
+        Motor_SetSpeed(0, 0);
+        PID_Reset(&linePID);
+    }
+    else {
+        uint8_t sensor_status = Sensor_Read_Tracking();
+        int8_t error = Get_Line_Error(sensor_status);
+        
+        // 2. 如果遇到 STOP_FLAG (全白 0x00 或 全黑 0x0F)
+        if (error == STOP_FLAG) {
+            Motor_SetSpeed(0, 0);  // 全部停车
+            PID_Reset(&linePID);   // 重置PID，防止下次启动冲出去
+        }
+        else {
+            // 3. 正常循线逻辑
+            last_error = error; 
+            
+            int16_t base_speed = 300;
+            // 严重偏移时大幅减速，提高稳定性
+            if (error >= 5 || error <= -5) base_speed = 100; 
+
+            int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
+            Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
+        }
+    }
+    HAL_Delay(10); 
+}
 }
 
 /**
