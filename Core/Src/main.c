@@ -119,11 +119,16 @@ int main(void)
       Motor_SetSpeed(120, -100);
       HAL_Delay(1600);
     }
+    
+    if(error==3){
+      Motor_SetSpeed(100, 120);
+      HAL_Delay(1000);
+    }
     // 2. 第一层：避障优先级最高
     if (Echo_Should_Stop(15.0f)) 
     {
         Motor_SetSpeed(0, 0);
-        PID_Reset(&linePID); // 停止时重置PID
+        HAL_Delay(10000); // 停止10秒，等待障碍物移开
     }
     
     // 3. 第二层：停止或丢线处理
@@ -131,16 +136,16 @@ int main(void)
     {
         // 如果是全白(0x0F)丢线，根据最后一次误差记忆，原地自旋找线
         // 这可以防止小车过弯太猛冲出赛道后就“死”在那边
-        if (sensor_status == 0x0F) 
+        if (sensor_status == 0x00) 
         {
-            if (last_error > 0)      Motor_SetSpeed(150, -150); // 向右找线
-            else if (last_error < 0) Motor_SetSpeed(-150, 150); // 向左找线
+            if (last_error > 0)      Motor_SetSpeed(-150, 150); // 向右找线
+            else if (last_error < 0) Motor_SetSpeed(150, -150); // 向左找线
             else                     Motor_SetSpeed(0, 0);
         }
         else // 全黑或其他停止状态
         {
             Motor_SetSpeed(0, 0);
-            PID_Reset(&linePID);
+            
         }
     }
 

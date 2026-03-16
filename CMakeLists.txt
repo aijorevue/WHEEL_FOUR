@@ -33,6 +33,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Hardware/OLED/oled.c
     # 如果你有 OLED 文件夹，请务必取消下面这行的注释并确认路径正确
     Hardware/OLED/oled.c 
+    Core/Src/echo.c
 )
 
 # 2. 添加所有头文件路径
