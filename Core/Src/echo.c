@@ -1,86 +1,79 @@
-#include "echo.h"
-#include "tim.h" // 需要用到定时器的计数器来记录时间
+/* 在 echo.c 的顶部添加 */
+#include "main.h"
 
-// 私有变量
-static uint32_t start_time = 0;
-static uint32_t end_time = 0;
-static uint8_t  edge_flag = 0; // 0: 等待上升沿, 1: 等待下降沿
-static float    last_distance = 0;
-static uint32_t last_echo_tick = 0; // 内部记录上次触发时间
+// 初始化 DWT 计数器
+void DWT_Init(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; // 开启 Trace
+    DWT->CYCCNT = 0;                                // 计数器清零
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;           // 开启循环计数器
+}
+
+// 获取当前微秒数 (针对 72MHz 系统频率)
+uint32_t DWT_GetUs(void) {
+    return DWT->CYCCNT / (SystemCoreClock / 1000000);
+}
+
+// 微秒级阻塞延时
+void DWT_Delay_us(uint32_t us) {
+    uint32_t startTick = DWT->CYCCNT;
+    uint32_t delayTicks = us * (SystemCoreClock / 1000000);
+    while ((DWT->CYCCNT - startTick) < delayTicks);
+}
+static uint32_t start_cycles = 0;
+static float last_distance = 0;
+static uint32_t last_echo_tick = 0;
+
 /**
- * @brief  向PB9发送10us以上的高电平触发信号
+ * @brief  触发超声波
  */
-void Echo_Trig(void)
-{
+void Echo_Trig(void) {
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
-    
-    // 简单的微秒延时 (72MHz下循环约500次接近10-15us)
-    for(uint32_t i=0; i<500; i++) __NOP();
-    
+    DWT_Delay_us(15); // 使用 DWT 进行精准 15us 延时
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
 }
 
 /**
- * @brief  外部中断回调的具体实现
- * @note   在 PB10 的双边沿中断中记录时间
+ * @brief  PB10 双边沿中断回调
  */
-void Echo_EXTI_Callback(uint16_t GPIO_Pin)
-{
-    if (GPIO_Pin == GPIO_PIN_10)
-    {
-        if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10) == GPIO_PIN_SET) // 上升沿
-        {
-            // 记录当前定时器的数值（借用电机用的 TIM3 或 TIM4 的 CNT）
-            // 假设你的定时器频率是 1MHz (即1us计1次)
-            start_time = __HAL_TIM_GET_COUNTER(&htim2); 
-            edge_flag = 1;
-        }
-        else // 下降沿
-        {
-            if (edge_flag == 1)
-            {
-                end_time = __HAL_TIM_GET_COUNTER(&htim2);
-                
-                uint32_t diff = 0;
-                if (end_time > start_time) 
-                    diff = end_time - start_time;
-                else 
-                    // 考虑定时器溢出回零的情况
-                    diff = (__HAL_TIM_GET_AUTORELOAD(&htim2) - start_time) + end_time;
-                
-                // 距离 = 时间(us) * 声速(0.034 cm/us) / 2
-                last_distance = diff * 0.017f;
-                edge_flag = 0;
-            }
+void Echo_EXTI_Callback(uint16_t GPIO_Pin) {
+    if (GPIO_Pin == GPIO_PIN_10) {
+        if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_10) == GPIO_PIN_SET) {
+            // 上升沿：记录当前的周期数
+            start_cycles = DWT->CYCCNT;
+        } 
+        else {
+            // 下降沿：计算周期差
+            uint32_t end_cycles = DWT->CYCCNT;
+            uint32_t diff = 0;
+            
+            if (end_cycles > start_cycles)
+                diff = end_cycles - start_cycles;
+            else
+                diff = (0xFFFFFFFF - start_cycles) + end_cycles; // 考虑32位溢出
+
+            // 距离计算：
+            // 1. 先将 diff 周期数转为微秒：diff / 72.0
+            // 2. 距离 = 时间(us) * 0.034 / 2
+            last_distance = (diff / 72.0f) * 0.017f;
         }
     }
 }
 
-/**
- * @brief  获取最后一次测量的距离值
- */
-float Echo_GetDistance(void)
-{
+float Echo_GetDistance(void) {
     return last_distance;
 }
-int Echo_Should_Stop(float threshold)
-{
-    // 1. 每隔 60ms 自动触发一次测距信号
-    if (HAL_GetTick() - last_echo_tick > 60) 
-    {
+
+// 判断避障函数保持不变...
+int Echo_Should_Stop(float threshold) {
+    if (HAL_GetTick() - last_echo_tick > 60) {
         Echo_Trig();
         last_echo_tick = HAL_GetTick();
     }
     
-    // 2. 获取当前最新的距离
     float dist = Echo_GetDistance();
-    
-    // 3. 判断是否满足避障条件
-    // 排除掉 1.0cm 以下的异常值（通常是盲区或未收到回响）
-    if (dist < threshold && dist > 1.0f) 
-    {
-        return 1; // 发现障碍物
+    // 过滤掉 HC-SR04 常见的异常值 0 或 超过 400cm
+    if (dist > 2.0f && dist < threshold) {
+        return 1;
     }
-    
-    return 0; // 道路安全
+    return 0;
 }
