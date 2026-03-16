@@ -10,6 +10,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "stm32f1xx_hal.h"
 #include "tim.h"
 #include "gpio.h"
 
@@ -46,27 +47,35 @@ int8_t Get_Line_Error(uint8_t state);
  * 状态定义: L2 L1 R1 R2 (从左到右)
  * 灰线返回 1
  */
+
 int8_t Get_Line_Error(uint8_t state) {
     switch (state) {
-        case 0x06: return 0;   // 0110 正中心
-        
-        // 稍微偏移
-        case 0x04: return -1;  // 0100 
-        case 0x02: return 1;   // 0010 
-        
-        // 中度偏移
-        case 0x0C: return -2;  // 1100
-        case 0x03: return 2;   // 0011
-        
-        // 严重偏移（外侧触发）
-        // 因为外侧远，赋予大权重(5)，强制PID输出大动作防止丢线
-        case 0x08: return -3;  // 1000 极左
-        case 0x01: return 3;   // 0001 极右
-        
-        // 停止状态
-        case 0x00: return STOP_FLAG; // 全白：停止
-        case 0x0F: return STOP_FLAG; // 全黑：停止
-        
+        /* ---------- 第一类：正中心 (0 误差) ---------- */
+        case 0x06: return 0;   // 0110：中间两路在白线上
+
+        /* ---------- 第二类：左偏 (误差为负，需要右转) ---------- */
+        case 0x04: return -1;  // 0100：中心稍左
+        case 0x0C: return -2;  // 1100：中度左偏
+        case 0x08: return -3;  // 1000：严重左偏（极左）
+        case 0x0E: return -4;  // 1110：大面积偏左（可能在急弯边缘）
+        case 0x0D: return -5;  // 1101：非典型左偏
+
+        /* ---------- 第三类：右偏 (误差为正，需要左转) ---------- */
+        case 0x02: return 1;   // 0010：中心稍右
+        case 0x03: return 2;   // 0011：中度右偏
+        case 0x01: return 3;   // 0001：严重右偏（极右）
+        case 0x07: return 4;   // 0111：大面积偏右（可能在急弯边缘）
+        case 0x0B: return 5;   // 1011：非典型右偏
+
+        /* ---------- 第四类：特殊状态 (丢线/特殊形状) ---------- */
+        case 0x05: return 0;   // 0101：中间跳跃，可能是干扰，维持原状
+        case 0x0A: return 0;   // 1010：中间跳跃，可能是干扰，维持原状
+        case 0x09: return 0;   // 1001：两边亮中间灭，可能是十字路口初期
+
+        /* ---------- 第五类：停止/丢线状态 (STOP_FLAG) ---------- */
+        case 0x00: return STOP_FLAG; // 0000：全白，可能是横线或彻底丢线
+        case 0x0F: return STOP_FLAG; // 1111：全黑，可能是彻底丢线
+
         default: return 0;
     }
 }
@@ -101,39 +110,63 @@ int main(void)
   /* Infinite loop */
   
  /* USER CODE BEGIN WHILE */
-/* USER CODE BEGIN WHILE */
-while (1)
-{
-    
-    // 1. 避障优先级最高
-    if (Echo_Should_Stop(15.0f)) {
+  while (1)
+  {
+    // 1. 获取传感器状态和误差
+    uint8_t sensor_status = Sensor_Read_Tracking();
+    int8_t error = Get_Line_Error(sensor_status);
+    if(error==-4){
+      Motor_SetSpeed(120, -100);
+      HAL_Delay(1600);
+    }
+    // 2. 第一层：避障优先级最高
+    if (Echo_Should_Stop(15.0f)) 
+    {
         Motor_SetSpeed(0, 0);
-        PID_Reset(&linePID);
+        PID_Reset(&linePID); // 停止时重置PID
     }
-    else {
-        uint8_t sensor_status = Sensor_Read_Tracking();
-        int8_t error = Get_Line_Error(sensor_status);
-        
-        // 2. 如果遇到 STOP_FLAG (全白 0x00 或 全黑 0x0F)
-        if (error == STOP_FLAG) {
-            Motor_SetSpeed(0, 0);  // 全部停车
-            PID_Reset(&linePID);   // 重置PID，防止下次启动冲出去
+    
+    // 3. 第二层：停止或丢线处理
+    else if (error == STOP_FLAG) 
+    {
+        // 如果是全白(0x0F)丢线，根据最后一次误差记忆，原地自旋找线
+        // 这可以防止小车过弯太猛冲出赛道后就“死”在那边
+        if (sensor_status == 0x0F) 
+        {
+            if (last_error > 0)      Motor_SetSpeed(150, -150); // 向右找线
+            else if (last_error < 0) Motor_SetSpeed(-150, 150); // 向左找线
+            else                     Motor_SetSpeed(0, 0);
         }
-        else {
-            // 3. 正常循线逻辑
-            last_error = error; 
-            
-            int16_t base_speed = 300;
-            // 严重偏移时大幅减速，提高稳定性
-            if (error >= 5 || error <= -5) base_speed = 100; 
+        else // 全黑或其他停止状态
+        {
+            Motor_SetSpeed(0, 0);
+            PID_Reset(&linePID);
+        }
+    }
 
-            int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
-            Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
-        }
+    // 4. 第三层：硬编码处理急弯 (当误差绝对值 >= 2 时)
+    // 包含状态：0x0C, 0x08, 0x0E, 0x0D (左偏) 和 0x03, 0x01, 0x07, 0x0B (右偏)
+    
+    else 
+    {
+        last_error = error; // 记录最后一次有效误差
+        
+        int16_t base_speed = 150; // 直道可以给高一点的基础速度
+        
+        // PID计算
+        int16_t turn_offset = (int16_t)PID_Compute(&linePID, 0.0f, (float)error);
+        
+        // 限制转向补偿范围，防止在直道猛晃
+        Motor_SetSpeed(base_speed + turn_offset, base_speed - turn_offset);
     }
-    HAL_Delay(10); 
+
+    // 6. 循环小延迟，保持 200Hz 的采样频率
+    HAL_Delay(5); 
+  }
+
+
 }
-}
+
 
 /**
   * @brief System Clock Configuration
