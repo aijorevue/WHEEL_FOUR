@@ -12,4 +12,8 @@ void Echo_Trig(void);
 // 内部使用的中断处理逻辑（会被main.c的中断回调调用）
 void Echo_EXTI_Callback(uint16_t GPIO_Pin);
 int Echo_Should_Stop(float threshold);
+void DWT_Init(void);
+void Echo_Trig(void);
+int Echo_Should_Stop(float threshold);
+
 #endif
