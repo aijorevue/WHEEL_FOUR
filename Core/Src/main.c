@@ -6,7 +6,6 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
@@ -21,12 +20,23 @@
 #include "PID.h"  
 /* USER CODE END Includes */
 
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define STOP_FLAG 99
 /* USER CODE END PD */
 
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
 PID_t linePID;  
 int8_t last_error = 0; 
@@ -36,7 +46,9 @@ typedef enum {
     STAGE_1_SEARCH_TURN = 0, // 第一阶段：循线并寻找转弯点
     STAGE_2_SEARCH_AVOID,    // 第二阶段：循线并寻找障碍物
     STAGE_3_FINAL_FOLLOW,     // 第三阶段：最后纯循线
-    STAGE_4_servo
+    STAGE_4_IDENTIFY_STATION, // 新增：检测到黑线后，等待货站信号
+    STAGE_5_SERVO_SWEEP       // 原来的舵机转动阶段
+    
 } RunStage_t;
 
 RunStage_t current_stage = STAGE_1_SEARCH_TURN;
@@ -44,7 +56,6 @@ RunStage_t current_stage = STAGE_1_SEARCH_TURN;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-
 /* USER CODE BEGIN PFP */
 int8_t Get_Line_Error(uint8_t state);
 void Do_Line_Follow(uint8_t status, int8_t err);
@@ -77,6 +88,12 @@ int8_t Get_Line_Error(uint8_t state) {
     }
 }
 
+void Servo_SetAngle(uint16_t angle) {
+    if (angle > 180) angle = 180;
+    // 将 0-180 度映射到 500-2500 的比较值
+    uint32_t compare_value = 500 + (angle * 2000 / 180);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, compare_value);
+}
 /**
  * 封装好的 PID 循线动作函数
  */
@@ -89,7 +106,7 @@ void Do_Line_Follow(uint8_t status, int8_t err) {
             else                     Motor_SetSpeed(0, 0);
         } else {
             // 这里处理 0x0F (全黑/交叉口)
-            // 在循线过程中遇到全黑，保持直行一段距离，而不是停车
+            // 在循线过程中遇到全黑，停车
             Motor_SetSpeed(0, 0); 
         }
     } else {
@@ -101,10 +118,32 @@ void Do_Line_Follow(uint8_t status, int8_t err) {
 }
 /* USER CODE END 0 */
 
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
 int main(void)
 {
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
@@ -112,11 +151,12 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
-
+  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   Motor_Init(); 
   HAL_TIM_Base_Start(&htim2); 
-
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+  __HAL_TIM_MOE_ENABLE(&htim1); 
   PID_Init(&linePID); 
   linePID.Kp = 50.0f;   
   linePID.Ki = 0.0f;    
@@ -133,60 +173,97 @@ int main(void)
     int8_t error = Get_Line_Error(sensor_status);
 
     // --- 核心状态机逻辑 ---
+    // --- 核心状态机逻辑 ---
     switch (current_stage) {
         
         case STAGE_1_SEARCH_TURN:
-            // 触发条件：识别到 -4 (左偏大) 或 0x0F (路口黑块)
+            // ... (保持你原来的代码不变)
             if (sensor_status == 0x0E || (sensor_status == 0x0F && error == -4)) {
-                Motor_SetSpeed(200, 0); // 执行大左转
-                HAL_Delay(1000);           // 强制执行 1.6秒
-                current_stage = STAGE_2_SEARCH_AVOID; // 完成后切到避障阶段
+                Motor_SetSpeed(200, 0); 
+                HAL_Delay(1000);           
+                current_stage = STAGE_2_SEARCH_AVOID; 
             } else {
                 Do_Line_Follow(sensor_status, error); 
             }
             break;
 
         case STAGE_2_SEARCH_AVOID:
-            // 实时检查避障传感器
+            // ... (保持你原来的代码不变)
             if (HAL_GPIO_ReadPin(GPIOC, Avoid_L_Pin) == GPIO_PIN_RESET || 
                 HAL_GPIO_ReadPin(GPIOC, Avoid_R_Pin) == GPIO_PIN_RESET) {
-                
-                Motor_SetSpeed(0, 200); // 避障动作 A
-                HAL_Delay(1700);
-                Motor_SetSpeed(200, 0); // 避障动作 B
-                HAL_Delay(1700);
-                Motor_SetSpeed(180, 180); // 避障动作 C
-                HAL_Delay(1800);
-                Motor_SetSpeed(200, 0);
-                HAL_Delay(1700);
-                Motor_SetSpeed(180, 180); // 避障动作 C
-                HAL_Delay(1800);
-                Motor_SetSpeed(0, 200);
-                HAL_Delay(1700);
-                current_stage = STAGE_3_FINAL_FOLLOW; // 避障完切到最后阶段
+                // 你的避障动作流程...
+                Motor_SetSpeed(0, 200); HAL_Delay(1300);
+                Motor_SetSpeed(200, 0); HAL_Delay(1400);
+                Motor_SetSpeed(260, 110); HAL_Delay(1300);
+                current_stage = STAGE_3_FINAL_FOLLOW; 
             } else {
                 Do_Line_Follow(sensor_status, error);
             }
             break;
 
         case STAGE_3_FINAL_FOLLOW:
+            // 看到全黑线（终点/货站位线）
             if(sensor_status == 0x0F) {
-                Motor_SetSpeed(0, 0); // 停车
-                current_stage = STAGE_4_servo; // 切到伺服阶段
+                Motor_SetSpeed(0, 0); // 立即停车
+                current_stage = STAGE_4_IDENTIFY_STATION; // 跳转到识别货站阶段
             } else {
                 Do_Line_Follow(sensor_status, error);
             }
             break;
-    }
 
+        case STAGE_4_IDENTIFY_STATION:
+            Motor_SetSpeed(200, 0); // 确保电机完全静止
+            HAL_Delay(1400); // 稍作停顿，模拟识别过程
+            Motor_SetSpeed(200, 200);
+            HAL_Delay(2000);
+            // 识别逻辑：如果左边或右边的红外传感器检测到了物体（RESET代表检测到）
+            if (HAL_GPIO_ReadPin(GPIOC, Avoid_L_Pin) == GPIO_PIN_RESET || 
+                HAL_GPIO_ReadPin(GPIOC, Avoid_R_Pin) == GPIO_PIN_RESET) {
+                
+                HAL_Delay(500); // 发现货站后稍作停顿，显得动作更有层次感
+                current_stage = STAGE_5_SERVO_SWEEP; // 识别成功，开始转舵机
+            }
+            else {
+              Motor_SetSpeed(-200, -200);
+              HAL_Delay(2000);
+            Motor_SetSpeed(0, 200); // 确保电机完全静止
+            HAL_Delay(2800);
+              Motor_SetSpeed(200, 200);
+              HAL_Delay(2000);
+               current_stage = STAGE_5_SERVO_SWEEP; // 
+            }
+            break;
+
+        case STAGE_5_SERVO_SWEEP:
+            Motor_SetSpeed(0, 0); // 舵机工作时保持电机静止
+            
+            static int16_t servo_angle = 0;   
+            static int8_t  servo_direction = 1; 
+
+            // 更新角度
+            servo_angle += (servo_direction * 2); 
+
+            if (servo_angle >= 180) {
+                servo_angle = 180;
+                servo_direction = -1;
+            } else if (servo_angle <= 0) {
+                servo_angle = 0;
+                servo_direction = 1;
+            }
+
+            Servo_SetAngle(servo_angle);
+            break;
+    }
     HAL_Delay(5); 
   }
-  /* USER CODE END WHILE */
-}
+    /* USER CODE END WHILE */
 
-/* 后续 SystemClock_Config 等函数保持不变... */
+    /* USER CODE BEGIN 3 */
+}
+  /* USER CODE END 3 */
 /**
   * @brief System Clock Configuration
+  * @retval None
   */
 void SystemClock_Config(void)
 {
@@ -194,6 +271,9 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -206,6 +286,8 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -225,17 +307,40 @@ void SystemClock_Config(void)
   }
 }
 
-void Error_Handler(void)
-{
-  __disable_irq();
-  while (1)
-  {
-  }
-}
-
 /* USER CODE BEGIN 4 */
 // 如果不需要其他外部中断，此回调函数可留空或删除内容
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 }
 /* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
