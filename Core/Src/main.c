@@ -194,7 +194,7 @@ int main(void)
                 // 你的避障动作流程...
                 Motor_SetSpeed(0, 200); HAL_Delay(1300);
                 Motor_SetSpeed(200, 0); HAL_Delay(1400);
-                Motor_SetSpeed(260, 110); HAL_Delay(1300);
+                Motor_SetSpeed(250, 120); HAL_Delay(1200);
                 current_stage = STAGE_3_FINAL_FOLLOW; 
             } else {
                 Do_Line_Follow(sensor_status, error);
@@ -212,10 +212,12 @@ int main(void)
             break;
 
         case STAGE_4_IDENTIFY_STATION:
-            Motor_SetSpeed(200, 0); // 确保电机完全静止
+            Motor_SetSpeed(100, 100);
+            HAL_Delay(600);
+            Motor_SetSpeed(200, 0); 
             HAL_Delay(1400); // 稍作停顿，模拟识别过程
-            Motor_SetSpeed(200, 200);
-            HAL_Delay(2000);
+            Motor_SetSpeed(0, 0);
+            HAL_Delay(100000);
             // 识别逻辑：如果左边或右边的红外传感器检测到了物体（RESET代表检测到）
             if (HAL_GPIO_ReadPin(GPIOC, Avoid_L_Pin) == GPIO_PIN_RESET || 
                 HAL_GPIO_ReadPin(GPIOC, Avoid_R_Pin) == GPIO_PIN_RESET) {
