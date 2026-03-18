@@ -47,7 +47,8 @@ typedef enum {
     STAGE_2_SEARCH_AVOID,    // 第二阶段：循线并寻找障碍物
     STAGE_3_FINAL_FOLLOW,     // 第三阶段：最后纯循线
     STAGE_4_IDENTIFY_STATION, // 新增：检测到黑线后，等待货站信号
-    STAGE_5_SERVO_SWEEP       // 原来的舵机转动阶段
+    STAGE_5_SERVO_SWEEP,       // 原来的舵机转动阶段
+    STAGE_6_FINAL_WAIT
     
 } RunStage_t;
 
@@ -164,7 +165,8 @@ int main(void)
   linePID.OutMax = 200; 
   linePID.OutMin = -200;
   /* USER CODE END 2 */
-
+  int left=0;
+  int right=0;
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
@@ -179,8 +181,8 @@ int main(void)
         case STAGE_1_SEARCH_TURN:
             // ... (保持你原来的代码不变)
             if (sensor_status == 0x0E || (sensor_status == 0x0F && error == -4)) {
-                Motor_SetSpeed(200, 0); 
-                HAL_Delay(1000);           
+                Motor_SetSpeed(220, 0); 
+                HAL_Delay(1500);           
                 current_stage = STAGE_2_SEARCH_AVOID; 
             } else {
                 Do_Line_Follow(sensor_status, error); 
@@ -193,8 +195,8 @@ int main(void)
                 HAL_GPIO_ReadPin(GPIOC, Avoid_R_Pin) == GPIO_PIN_RESET) {
                 // 你的避障动作流程...
                 Motor_SetSpeed(0, 200); HAL_Delay(1300);
-                Motor_SetSpeed(200, 0); HAL_Delay(1400);
-                Motor_SetSpeed(250, 120); HAL_Delay(1200);
+                Motor_SetSpeed(300, 70); HAL_Delay(1700);
+                Motor_SetSpeed(0, 0); HAL_Delay(50000);
                 current_stage = STAGE_3_FINAL_FOLLOW; 
             } else {
                 Do_Line_Follow(sensor_status, error);
@@ -213,47 +215,66 @@ int main(void)
 
         case STAGE_4_IDENTIFY_STATION:
             Motor_SetSpeed(100, 100);
-            HAL_Delay(600);
+            HAL_Delay(950);
             Motor_SetSpeed(200, 0); 
-            HAL_Delay(1400); // 稍作停顿，模拟识别过程
+            HAL_Delay(1200); // 稍作停顿，模拟识别过程
             Motor_SetSpeed(0, 0);
-            HAL_Delay(100000);
+            HAL_Delay(1000);
             // 识别逻辑：如果左边或右边的红外传感器检测到了物体（RESET代表检测到）
             if (HAL_GPIO_ReadPin(GPIOC, Avoid_L_Pin) == GPIO_PIN_RESET || 
                 HAL_GPIO_ReadPin(GPIOC, Avoid_R_Pin) == GPIO_PIN_RESET) {
                 
                 HAL_Delay(500); // 发现货站后稍作停顿，显得动作更有层次感
+                Motor_SetSpeed(-120, 0); HAL_Delay(1250); // 继续前进一段距离，确保完全进入货站
+                Motor_SetSpeed(100, 210); HAL_Delay(1500); // 微调位置，准备转向
+                Motor_SetSpeed(-150,-150); HAL_Delay(3000); // 倒退出货站
+                left=1;
                 current_stage = STAGE_5_SERVO_SWEEP; // 识别成功，开始转舵机
             }
             else {
-              Motor_SetSpeed(-200, -200);
-              HAL_Delay(2000);
+            Motor_SetSpeed(-200, 0); HAL_Delay(1200);
             Motor_SetSpeed(0, 200); // 确保电机完全静止
-            HAL_Delay(2800);
-              Motor_SetSpeed(200, 200);
-              HAL_Delay(2000);
+            HAL_Delay(1200);
+            
+              right=1;
                current_stage = STAGE_5_SERVO_SWEEP; // 
             }
             break;
 
         case STAGE_5_SERVO_SWEEP:
-            Motor_SetSpeed(0, 0); // 舵机工作时保持电机静止
-            
-            static int16_t servo_angle = 0;   
-            static int8_t  servo_direction = 1; 
+    Motor_SetSpeed(0, 0); 
+    static int16_t servo_angle = 0;   
+    static int8_t  servo_direction = 1; 
 
-            // 更新角度
-            servo_angle += (servo_direction * 2); 
+    servo_angle += (servo_direction * 2); 
+    Servo_SetAngle(servo_angle);
 
-            if (servo_angle >= 180) {
-                servo_angle = 180;
-                servo_direction = -1;
-            } else if (servo_angle <= 0) {
-                servo_angle = 0;
-                servo_direction = 1;
+    // 等到舵机转到180度并转回0度后再跳转
+    if (servo_angle >= 180) {
+        servo_direction = -1;
+    } 
+    if (servo_angle <= 0 && servo_direction == -1) {
+        current_stage = STAGE_6_FINAL_WAIT; // 只有转完了才跳到下一阶段
+    }
+    HAL_Delay(20); // 给舵机物理转动留出时间，原有的5ms太快了
+    break;   
+        case STAGE_6_FINAL_WAIT:
+            if(left == 1) {
+                // 左侧货站处理完毕后的动作
+                Motor_SetSpeed(0, 0); HAL_Delay(500);
+                left = 2;
+            } else if(right == 1) {
+                // 右侧货站处理完毕后的动作
+                Motor_SetSpeed(0, 0); HAL_Delay(500);
+                right = 2;
             }
-
-            Servo_SetAngle(servo_angle);
+             // 转向完成后，执行“见黑即停”逻辑
+            if (sensor_status != 0x00) {
+                Motor_SetSpeed(0, 0); // 撞线停车
+                while(1);            // 任务彻底终结
+            } else {
+                Motor_SetSpeed(150, 150); // 没撞线，一直以 150 速度跑
+            }
             break;
     }
     HAL_Delay(5); 
